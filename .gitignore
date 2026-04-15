@@ -20,3 +20,8 @@ dist/
 
 # Local tool marker
 .codex
+
+# Environment
+.env
+.env.*
+!.env.example

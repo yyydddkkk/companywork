@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import FastAPI, File, Request, UploadFile
@@ -11,6 +12,7 @@ from .services.job_service import JobService
 
 
 def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s - %(message)s')
     settings = load_settings(overrides)
     app = FastAPI(title='Issue Multi-Agent MVP')
     app.add_middleware(
@@ -30,12 +32,16 @@ def create_app(overrides: dict[str, Any] | None = None) -> FastAPI:
 
     @app.post('/api/issues/analyze')
     def analyze(payload: AnalyzeRequest, request: Request) -> dict[str, Any]:
-        return request.app.state.job_service.analyze(payload)
+        return request.app.state.job_service.enqueue_analyze(payload)
 
     @app.post('/api/issues/analyze/upload')
     async def analyze_upload(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
         content = await file.read()
-        return request.app.state.job_service.analyze_upload(file.filename or 'issues.json', content)
+        return request.app.state.job_service.enqueue_analyze_upload(file.filename or 'issues.json', content)
+
+    @app.get('/api/jobs/{job_id}')
+    def get_job_status(job_id: str, request: Request) -> dict[str, Any]:
+        return request.app.state.job_service.get_job_status(job_id)
 
     @app.get('/api/reports/{report_id}')
     def get_report(report_id: str, request: Request) -> dict[str, Any]:

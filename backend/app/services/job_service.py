@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import HTTPException
@@ -22,18 +23,47 @@ class JobService:
         self.repository = Repository(self.database)
         self.issue_loader = IssueLoader(settings)
         self.llm_client = LLMClient(settings)
-        self.orchestrator = Orchestrator(self.repository, settings.project_root, self.llm_client)
+        self.orchestrator = Orchestrator(
+            self.repository,
+            settings.project_root,
+            self.llm_client,
+            settings.github_token,
+            settings.debugger_require_llm,
+        )
         self.report_builder = ReportBuilder()
+        self.logger = logging.getLogger(__name__)
 
-    def analyze(self, payload: AnalyzeRequest) -> dict[str, Any]:
-        source, issues, metadata = self.issue_loader.load_from_request(payload)
-        return self._analyze_normalized(source, issues, metadata)
+    def enqueue_analyze(self, payload: AnalyzeRequest) -> dict[str, Any]:
+        try:
+            source, issues, metadata = self.issue_loader.load_from_request(payload)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return self._start_job(source, issues, metadata)
 
-    def analyze_upload(self, filename: str, raw_bytes: bytes) -> dict[str, Any]:
-        source, issues, metadata = self.issue_loader.load_from_upload(filename, raw_bytes)
+    def enqueue_analyze_upload(self, filename: str, raw_bytes: bytes) -> dict[str, Any]:
+        try:
+            source, issues, metadata = self.issue_loader.load_from_upload(filename, raw_bytes)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         if not issues:
             raise HTTPException(status_code=400, detail='Uploaded file did not contain any issues.')
-        return self._analyze_normalized(source, issues, metadata)
+        return self._start_job(source, issues, metadata)
+
+    def get_job_status(self, job_id: str) -> dict[str, Any]:
+        job = self.repository.get_job(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail='Job not found.')
+        trace = self.repository.get_agent_runs(job_id)
+        report = self.repository.get_report_record(job_id)
+        return {
+            'job_id': job['id'],
+            'status': job['status'],
+            'created_at': job['created_at'],
+            'updated_at': job['updated_at'],
+            'report_ready': bool(report),
+            'report_id': report['id'] if report else None,
+            'agent_trace': [_serialize_trace_item(item) for item in trace],
+        }
 
     def get_report(self, report_id: str) -> dict[str, Any]:
         report = self.repository.get_report_record(report_id)
@@ -98,20 +128,31 @@ class JobService:
             'debugger': rerun['result']['artifacts'],
         }
 
-    def _analyze_normalized(self, source: str, issues: list[dict[str, Any]], metadata: dict[str, Any]) -> dict[str, Any]:
+    def _start_job(self, source: str, issues: list[dict[str, Any]], metadata: dict[str, Any]) -> dict[str, Any]:
         job_id, stored_issues = self.repository.create_job(source, issues, metadata)
-        primary_issue = issues[0]
-        result = self.orchestrator.analyze(job_id, primary_issue)
-        diagnosis = self._build_diagnosis(
-            primary_issue,
-            result['context'],
-            result['context'],
-            result['branch_result']['artifacts'] if result['branch_result'] else {},
-        )
-        requires_human = bool(diagnosis.get('requires_human', False))
-        html_report = self.report_builder.build(primary_issue, result['trace'], diagnosis, requires_human, [])
-        self.repository.save_report(job_id, job_id, stored_issues[0]['id'], diagnosis['type'], diagnosis, html_report, requires_human, 0)
-        return {'report_id': job_id, 'status': 'completed'}
+        self.repository.update_job_status(job_id, 'queued')
+        self._run_job(job_id, stored_issues[0]['id'], issues[0], metadata)
+        return {'report_id': job_id, 'job_id': job_id, 'status': 'completed'}
+
+    def _run_job(self, job_id: str, issue_id: str, primary_issue: dict[str, Any], metadata: dict[str, Any]) -> None:
+        self.logger.info('analysis job started: %s', job_id)
+        self.repository.update_job_status(job_id, 'running')
+        try:
+            result = self.orchestrator.analyze(job_id, primary_issue, metadata)
+            diagnosis = self._build_diagnosis(
+                primary_issue,
+                result['context'],
+                result['context'],
+                result['branch_result']['artifacts'] if result['branch_result'] else {},
+            )
+            requires_human = bool(diagnosis.get('requires_human', False))
+            html_report = self.report_builder.build(primary_issue, result['trace'], diagnosis, requires_human, [])
+            self.repository.save_report(job_id, job_id, issue_id, diagnosis['type'], diagnosis, html_report, requires_human, 0)
+            self.logger.info('analysis job completed: %s type=%s', job_id, diagnosis['type'])
+        except Exception:
+            self.repository.update_job_status(job_id, 'failed')
+            self.logger.exception('analysis job failed: %s', job_id)
+            raise
 
     def _build_diagnosis(
         self,
@@ -128,6 +169,9 @@ class JobService:
             'triage_rationale': triage_context.get('rationale', ''),
             'related_files': research_context.get('related_files', []),
             'research_summary': research_context.get('research_summary', ''),
+            'source_scope': research_context.get('source_scope', 'local_project'),
+            'source_repo': research_context.get('source_repo'),
+            'degraded_reason': research_context.get('degraded_reason'),
             'root_cause_hypothesis': branch_artifacts.get('root_cause_hypothesis', research_context.get('research_summary', 'Further analysis required.')),
             'fix_suggestions': branch_artifacts.get('fix_suggestions', ['Review the highlighted files and confirm the intended workflow.']),
             'reproduce_steps': branch_artifacts.get('reproduce_steps', []),
@@ -137,6 +181,8 @@ class JobService:
             'suggested_updates': branch_artifacts.get('suggested_updates', []),
             'requires_human': branch_artifacts.get('requires_human', False),
             'human_reason': branch_artifacts.get('human_reason'),
+            'llm_error_kind': branch_artifacts.get('llm_error_kind'),
+            'llm_error_message': branch_artifacts.get('llm_error_message'),
         }
         return diagnosis
 

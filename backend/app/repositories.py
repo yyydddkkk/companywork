@@ -153,6 +153,13 @@ class Repository:
         data['raw'] = json.loads(data.pop('raw_json'))
         return data
 
+    def update_job_status(self, job_id: str, status: str) -> None:
+        with self.database.connect() as conn:
+            conn.execute(
+                'UPDATE analysis_jobs SET status = ?, updated_at = ? WHERE id = ?',
+                (status, _utc_now(), job_id),
+            )
+
     def get_agent_runs(self, job_id: str) -> list[dict[str, Any]]:
         with self.database.connect() as conn:
             rows = conn.execute(

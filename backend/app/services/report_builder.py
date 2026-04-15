@@ -51,8 +51,13 @@ class ReportBuilder:
       <section id=\"diagnosis\">
         <h2>Diagnosis</h2>
         <p><strong>type:</strong> {escape(diagnosis.get('type', 'Unknown'))}</p>
+        <p><strong>source_scope:</strong> {escape(str(diagnosis.get('source_scope', 'local_project')))}</p>
+        <p><strong>source_repo:</strong> {escape(str(diagnosis.get('source_repo') or '-'))}</p>
         <p><strong>root_cause_hypothesis:</strong> {escape(diagnosis.get('root_cause_hypothesis', 'Not available'))}</p>
         <p><strong>requires_human:</strong> {str(requires_human).lower()}</p>
+        <p><strong>degraded_reason:</strong> {escape(str(diagnosis.get('degraded_reason') or '-'))}</p>
+        <p><strong>llm_error_kind:</strong> {escape(str(diagnosis.get('llm_error_kind') or '-'))}</p>
+        <p><strong>llm_error_message:</strong> {escape(str(diagnosis.get('llm_error_message') or '-'))}</p>
         <h3>Related Files</h3>
         <ul>{related_files}</ul>
         <h3>Fix Suggestions</h3>

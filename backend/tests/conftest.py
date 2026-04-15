@@ -21,6 +21,8 @@ def run_server(database_path: Path) -> Iterator[str]:
     env = os.environ.copy()
     env['DATABASE_PATH'] = str(database_path)
     env['PROJECT_ROOT'] = str(BACKEND_DIR.parent)
+    env['ENABLE_GITHUB_FETCH'] = 'false'
+    env['GITHUB_TOKEN'] = ''
     process = subprocess.Popen(
         [
             str(BACKEND_DIR / '.venv' / 'bin' / 'python'),

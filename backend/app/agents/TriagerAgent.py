@@ -34,6 +34,7 @@ class TriagerAgent:
             confidence = 0.77
             rationale = 'Detected inquiry-oriented phrasing.'
 
+        llm_enabled = bool(self.llm_client and self.llm_client.is_enabled())
         llm_note = None
         if self.llm_client:
             llm_note = self.llm_client.complete(
@@ -49,6 +50,8 @@ class TriagerAgent:
                 'issue_type': issue_type,
                 'confidence': confidence,
                 'rationale': rationale,
+                'llm_enabled': llm_enabled,
+                'llm_used': bool(llm_note),
             },
             'evidence': [
                 {

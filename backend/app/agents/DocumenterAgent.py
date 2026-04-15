@@ -24,6 +24,7 @@ class DocumenterAgent:
             'Add a short troubleshooting subsection for the reported confusion point.',
         ]
         gap_analysis = 'The available documentation does not fully match the issue description or current workflow.'
+        llm_enabled = bool(self.llm_client and self.llm_client.is_enabled())
         llm_note = None
         if self.llm_client:
             llm_note = self.llm_client.complete(
@@ -40,6 +41,8 @@ class DocumenterAgent:
                 'doc_targets': doc_targets,
                 'gap_analysis': gap_analysis,
                 'suggested_updates': suggested_updates,
+                'llm_enabled': llm_enabled,
+                'llm_used': bool(llm_note),
             },
             'evidence': [
                 {'source': target, 'excerpt': context.get('research_summary', '')[:220]}

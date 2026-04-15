@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 import re
 
+from ..services.github_repo_searcher import GitHubRepoSearcher, extract_issue_hints
 from ..services.llm_client import LLMClient
 
 
@@ -17,30 +18,54 @@ TEXT_SUFFIXES = {'.py', '.md', '.tsx', '.ts', '.js', '.jsx', '.json', '.yml', '.
 class ResearcherAgent:
     name = 'Researcher'
 
-    def __init__(self, project_root: str, llm_client: LLMClient | None = None) -> None:
+    def __init__(
+        self,
+        project_root: str,
+        llm_client: LLMClient | None = None,
+        github_searcher: GitHubRepoSearcher | None = None,
+    ) -> None:
         self.project_root = Path(project_root)
         self.llm_client = llm_client
+        self.github_searcher = github_searcher or GitHubRepoSearcher()
 
     def run(self, issue: dict[str, Any], context: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         tokens = self._keywords(issue)
+        mode = (context.get('mode') or '').lower()
+        owner = str(context.get('owner') or '')
+        repo = str(context.get('repo') or '')
+        source_scope = 'local_project'
+        source_repo = None
+        degraded_reason = None
+
         matches: list[dict[str, Any]] = []
-        for path in self._iter_files():
-            try:
-                text = path.read_text(encoding='utf-8')
-            except UnicodeDecodeError:
-                continue
-            lowered = text.lower()
-            score = sum(lowered.count(token) + str(path).lower().count(token) for token in tokens)
-            if score <= 0:
-                continue
-            excerpt = self._extract_excerpt(text, tokens)
-            matches.append(
-                {
-                    'path': str(path.relative_to(self.project_root)),
-                    'score': score,
-                    'excerpt': excerpt,
-                }
-            )
+        if mode == 'github' and owner and repo:
+            source_scope = 'github_repo'
+            source_repo = f'{owner}/{repo}'
+            matches, degraded_reason = self.github_searcher.search(owner, repo, tokens, max_files=5)
+            if not matches:
+                source_scope = 'issue_only_fallback'
+                hints = extract_issue_hints(issue)
+                matches = [{'path': hint, 'score': 1, 'excerpt': 'Extracted from issue content.'} for hint in hints]
+                if not degraded_reason:
+                    degraded_reason = 'No repository evidence matched this issue; fell back to issue text only.'
+        else:
+            for path in self._iter_files():
+                try:
+                    text = path.read_text(encoding='utf-8')
+                except UnicodeDecodeError:
+                    continue
+                lowered = text.lower()
+                score = sum(lowered.count(token) + str(path).lower().count(token) for token in tokens)
+                if score <= 0:
+                    continue
+                excerpt = self._extract_excerpt(text, tokens)
+                matches.append(
+                    {
+                        'path': str(path.relative_to(self.project_root)),
+                        'score': score,
+                        'excerpt': excerpt,
+                    }
+                )
 
         matches.sort(key=lambda item: (-item['score'], item['path']))
         top_matches = matches[:5]
@@ -50,7 +75,10 @@ class ResearcherAgent:
         research_summary = 'No strong repository matches found; fall back to issue text and defaults.'
         if top_matches:
             research_summary = 'Top evidence came from ' + ', '.join(item['path'] for item in top_matches[:3]) + '.'
+        if degraded_reason:
+            research_summary = f'{research_summary} Degraded mode: {degraded_reason}'
 
+        llm_enabled = bool(self.llm_client and self.llm_client.is_enabled())
         llm_note = None
         if self.llm_client and top_matches:
             llm_note = self.llm_client.complete(
@@ -73,6 +101,11 @@ class ResearcherAgent:
                 'code_snippets': code_snippets,
                 'doc_snippets': doc_snippets,
                 'research_summary': research_summary,
+                'llm_enabled': llm_enabled,
+                'llm_used': bool(llm_note),
+                'source_scope': source_scope,
+                'source_repo': source_repo,
+                'degraded_reason': degraded_reason,
             },
             'evidence': evidence,
         }
